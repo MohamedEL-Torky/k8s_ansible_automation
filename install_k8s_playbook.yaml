@@ -182,11 +182,6 @@
         path: /etc/kubernetes/admin.conf
       register: k8s_initialized
 
-    - name: Check if kube config for ansible user exists
-      stat:
-        path: /home/ansible/.kube/config
-      register: config_initialized
-
     - name: Initialize the Kubernetes cluster
       become_user: root
       shell: kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=10.0.227.73
@@ -205,6 +200,16 @@
         block: '{{init_output.stdout}}'
         create: true
       when: k8s_initialized.stat.exists is not defined or not k8s_initialized.stat.exists
+    
+    - name: reverify if Kubernetes is already initialized on the controlplane node
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: k8s_initialized
+
+    - name: Check if kube config for ansible user exists
+      stat:
+        path: /home/ansible/.kube/config
+      register: config_initialized
 
     - name: install pre-requisites
       pip:
@@ -217,6 +222,10 @@
       shell: cat /home/ansible/kubeadm-join.out | grep 'kubeadm join .*' -A1
       register: kubeadm_join_command
       when: k8s_initialized.stat.exists is defined and k8s_initialized.stat.exists
+    
+    - name: debug print
+      debug:
+        msg: "{{config_initialized}}"
 
     - name: Extract kube config file
       become_user: ansible
@@ -227,7 +236,7 @@
     - name: Add kube config file to access cluster
       become_user: ansible
       shell: "{{kube_config.stdout}}"
-      when: config_initialized is not defined or not config_initialized
+      when: config_initialized.stat.exists is not defined or not config_initialized.stat.exists
 
     # Use k8s Ansible module to apply Calico networking plugin
     - name: Apply Calico networking plugin
@@ -235,6 +244,7 @@
       k8s:
         state: present
         definition: '{{ lookup("url", "https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml", split_lines=False) | from_yaml_all | list }}' 
+
     - name: setfact across hosts
       set_fact:
         kubeadm_join: "{{kubeadm_join_command.stdout}}"
@@ -258,7 +268,7 @@
     - name: Join the Kubernetes cluster using copied command
       shell: "{{hostvars.controlplane.kubeadm_join}}"
       register: join_output
-      when: kubelete_config_initialized is not defined or not kubelete_config_initialized
+      when: kubelete_config_initialized.stat.exists is not defined or not kubelete_config_initialized.stat.exists
     
     - name: kubeadmin join output
       become_user: ansible
@@ -266,5 +276,5 @@
         path: ~/kubeadm-join.out
         block: '{{join_output.stdout}}'
         create: true
-      when: kubelete_config_initialized is not defined or not kubelete_config_initialized
+      when: kubelete_config_initialized.stat.exists is not defined or not kubelete_config_initialized.stat.exists
 
