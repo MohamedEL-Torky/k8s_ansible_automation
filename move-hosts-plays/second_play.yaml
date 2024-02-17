@@ -1,0 +1,20 @@
+- hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Include the variable from the file
+      include_vars:
+        file: "/tmp/local_hosts_var.yml"
+
+    - name: Add specific lines to remote /etc/hosts
+      blockinfile:
+        path: /etc/hosts
+        block: "{{ local_hosts_var | join('\n') }}"
+        backup: yes
+      become: true
+
+    - name: Flush DNS cache using systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted
+      become: true

@@ -1,0 +1,270 @@
+- name: update package lists on all nodes
+  hosts: all
+  become: true
+  tasks:
+    - name: Ensure package lists are updated
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+- name: configure network
+  hosts: all
+  become: true
+  tasks:
+    - name: Load kernel modules for Kubernetes
+      block:
+        - name: Load kernel modules for Kubernetes
+          shell: "cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf\noverlay\nbr_netfilter\nEOF"
+        - name: Modprobe overlay
+          shell: "sudo modprobe overlay"
+        - name: Modprobe br_netfilter
+          shell: "sudo modprobe br_netfilter"
+      become: true
+
+    - name: Set sysctl parameters for Kubernetes
+      block:
+        - name: Set sysctl parameters for Kubernetes
+          shell: "cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf\nnet.bridge.bridge-nf-call-iptables  = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\nnet.ipv4.ip_forward = 1\nEOF"
+    - name: Apply sysctl parameters without reboot
+      shell: "sudo sysctl --system"
+      become: true
+
+    - name: Verify kernel modules
+      shell: "lsmod | grep {{ item }}"
+      with_items:
+        - br_netfilter
+        - overlay
+
+    - name: Verify sysctl parameters
+      command: "sysctl {{ item }}"
+      with_items:
+        - "net.bridge.bridge-nf-call-iptables"
+        - "net.bridge.bridge-nf-call-ip6tables"
+        - "net.ipv4.ip_forward"
+
+- name: install containerd
+  hosts: all
+  become: true
+  tasks:
+    - name: Add Docker's official GPG key
+      apt:
+        name:
+          - ca-certificates
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Create directory for apt keyrings
+      file:
+        path: "/etc/apt/keyrings"
+        state: directory
+        mode: "0755"
+
+    - name: Download and install Docker's GPG key
+      get_url:
+        url: "https://download.docker.com/linux/ubuntu/gpg"
+        dest: "/etc/apt/keyrings/docker.asc"
+        mode: "0644"
+
+    - name: Remove docker.list file if it exists
+      file:
+        path: /etc/apt/sources.list.d/docker.list
+        state: absent
+
+    - name: Get DEB architecture
+      shell: dpkg --print-architecture
+      register: deb_architecture
+
+    - name: Overwrite containerd configuration
+      blockinfile:
+        path: /etc/apt/sources.list.d/docker.list
+        block: "deb [arch={{deb_architecture.stdout}} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        create: yes
+
+    - name: Update apt repository
+      apt:
+        update_cache: yes
+
+    - name: Install containerd.io
+      apt:
+        name: containerd.io
+        state: present
+
+    - name: Overwrite containerd configuration
+      blockinfile:
+        path: /etc/containerd/config.toml
+        block: |
+          version = 2
+          [plugins]
+            [plugins."io.containerd.grpc.v1.cri"]
+              [plugins."io.containerd.grpc.v1.cri".containerd]
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+                  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                      runtime_type = "io.containerd.runc.v2"
+                    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                      SystemdCgroup = true
+        create: true
+
+      notify: Reload containerd
+
+  handlers:
+    - name: Reload containerd
+      systemd:
+        name: containerd
+        state: restarted
+
+- name: install k8s
+  hosts: all
+  become: true
+  tasks:
+    - name: Update package lists
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install basic requirements
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gpg
+          - software-properties-common
+          - apt-transport-https
+          - lookup
+          - pip
+        state: present
+
+    - name: Check if /etc/apt/keyrings exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: 0755
+
+    - name: Fetch and import Kubernetes GPG key (shell)
+      shell: |
+        rm /etc/apt/keyrings/kubernetes-apt-keyring.gpg &&
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      register: key_import
+
+    - name: Check for successful key import
+      debug:
+        msg: "{{ key_import.rc }}"
+      when: key_import is changed
+    
+    - name: Add Kubernetes repository (Ansible v2)
+      apt_repository:
+        repo: deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /
+        state: present
+
+    - name: Update package lists again
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Kubernetes packages
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    - name: Hold Kubernetes packages for updates (Ansible v2)
+      become: true
+      shell: dpkg --get-selections | grep -E 'kubelet|kubeadm|kubectl' | awk '{print $1}' | xargs sudo apt-mark hold
+
+- name: create the cluster and join nodes
+  hosts: k8s_controlplane
+  become: true
+  tasks:
+    - name: Check if Kubernetes is already initialized on the controlplane node
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: k8s_initialized
+
+    - name: Check if kube config for ansible user exists
+      stat:
+        path: /home/ansible/.kube/config
+      register: config_initialized
+
+    - name: Initialize the Kubernetes cluster
+      become_user: root
+      shell: kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=10.0.227.73
+      register: init_output
+      when: k8s_initialized.stat.exists is not defined or not k8s_initialized.stat.exists
+
+    - name: Copy kubeadm join command to clipboard (alternative)
+      debug:
+        msg: "The kubeadm join command for nodes is:\n{{ init_output.stdout }}"
+      when: k8s_initialized.stat.exists is not defined or not k8s_initialized.stat.exists
+
+    - name: kubeadmin init output
+      become_user: ansible
+      blockinfile:
+        path: ~/kubeadm-join.out
+        block: '{{init_output.stdout}}'
+        create: true
+      when: k8s_initialized.stat.exists is not defined or not k8s_initialized.stat.exists
+
+    - name: install pre-requisites
+      pip:
+        name:
+          - pyyaml
+          - kubernetes
+
+    - name: Extract kubeadm join command
+      become_user: ansible
+      shell: cat /home/ansible/kubeadm-join.out | grep 'kubeadm join .*' -A1
+      register: kubeadm_join_command
+      when: k8s_initialized.stat.exists is defined and k8s_initialized.stat.exists
+
+    - name: Extract kube config file
+      become_user: ansible
+      shell: cat /home/ansible/kubeadm-join.out | grep 'mkdir .*' -A2
+      register: kube_config
+      when: k8s_initialized.stat.exists is defined and k8s_initialized.stat.exists
+      
+    - name: Add kube config file to access cluster
+      become_user: ansible
+      shell: "{{kube_config.stdout}}"
+      when: config_initialized is not defined or not config_initialized
+
+    # Use k8s Ansible module to apply Calico networking plugin
+    - name: Apply Calico networking plugin
+      become_user: ansible
+      k8s:
+        state: present
+        definition: '{{ lookup("url", "https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml", split_lines=False) | from_yaml_all | list }}' 
+    - name: setfact across hosts
+      set_fact:
+        kubeadm_join: "{{kubeadm_join_command.stdout}}"
+
+    - name: Copy kubeadm join command to clipboard (alternative)
+      debug:
+        msg: "The kubeadm join command for nodes is: {{kubeadm_join}}"
+
+- hosts: k8s_nodes
+  become: true
+  tasks:
+    - name: Check if kube config for kubelet is set or not
+      stat:
+        path: /var/lib/kubelet/config.yaml
+      register: kubelete_config_initialized
+
+    - name: Debug - Verify the value of kubeadm join command on worker nodes
+      debug:
+        var: hostvars.controlplane.kubeadm_join
+
+    - name: Join the Kubernetes cluster using copied command
+      shell: "{{hostvars.controlplane.kubeadm_join}}"
+      register: join_output
+      when: kubelete_config_initialized is not defined or not kubelete_config_initialized
+    
+    - name: kubeadmin join output
+      become_user: ansible
+      blockinfile:
+        path: ~/kubeadm-join.out
+        block: '{{join_output.stdout}}'
+        create: true
+      when: kubelete_config_initialized is not defined or not kubelete_config_initialized
+

@@ -1,0 +1,27 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Fetch specific lines from local /etc/hosts
+      command: "awk 'NR>=3 && NR<=7' /etc/hosts"
+      register: k8s_hosts
+      changed_when: false
+
+- hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - debug:
+        var: hostvars.localhost.k8s_hosts
+
+    - name: Add specific lines to remote /etc/hosts
+      blockinfile:
+        path: /etc/hosts
+        block: '{{ hostvars.localhost.k8s_hosts.stdout }}'
+        backup: yes
+      become: true
+
+    - name: Flush DNS cache using systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted
+      become: true

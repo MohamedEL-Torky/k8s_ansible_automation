@@ -1,0 +1,17 @@
+- hosts: localhost
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Fetch specific lines from local /etc/hosts
+      command: "awk 'NR>=3 && NR<=7' /etc/hosts"
+      register: local_hosts
+      changed_when: false
+
+    - name: Set fact with local_hosts variable
+      set_fact:
+        local_hosts_var: "{{ local_hosts.stdout_lines }}"
+      # Save the variable to a file on the localhost
+      delegate_to: localhost
+      copy:
+        content: "{{ local_hosts_var | to_nice_yaml }}"
+        dest: "/tmp/local_hosts_var.yml"

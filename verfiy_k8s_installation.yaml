@@ -1,0 +1,68 @@
+- hosts: k8s_all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Ping all hosts
+      ping:
+
+    - name: Check Kubernetes installation on controlplane
+      when: inventory_hostname in groups['k8s_controlplane']
+      stat:
+        path: /usr/local/bin/kubectl
+      register: kubectl_controlplane
+
+    - name: Check Kubernetes installation on nodes
+      when: inventory_hostname in groups['k8s_nodes']
+      stat:
+        path: /usr/local/bin/kubectl
+      register: kubectl_nodes
+
+    - name: Print kubectl status on controlplane
+      debug:
+        msg: "Controlplane {{ inventory_hostname }}: kubectl found? {{ kubectl_controlplane.stat.exists }}"
+
+    - name: Print kubectl status on nodes
+      debug:
+        msg: "Node {{ inventory_hostname }}: kubectl found? {{ kubectl_nodes.stat.exists }}"
+
+    - name: Get Kubernetes node status on controlplane (if kubectl found)
+      when: kubectl_controlplane.stat.exists
+      shell: kubectl get nodes
+      register: node_status
+      delegate_to: localhost
+
+    - name: Print node status on controlplane
+      when: kubectl_controlplane.stat.exists
+      debug:
+        msg: "Cluster nodes:\n{{ node_status.stdout }}"
+
+    - name: Check pod status on controlplane (if kubectl found)
+      when: kubectl_controlplane.stat.exists
+      shell: kubectl get pods --all-namespaces
+      register: pod_status
+      delegate_to: localhost
+
+    - name: Print pod status on controlplane
+      when: kubectl_controlplane.stat.exists
+      debug:
+        msg: "Pods:\n{{ pod_status.stdout }}"
+
+- name: Additional checks (customize and expand)
+  hosts: k8s_controlplane
+  become: true
+  tasks:
+    - name: Check kube-apiserver process status
+      service:
+        name: kube-apiserver
+        state: running
+
+    - name: Check etcd process status
+      service:
+        name: etcd
+        state: running
+
+    - name: Check kubelet process status on nodes
+      when: inventory_hostname in groups['k8s_nodes']
+      service:
+        name: kubelet
+        state: running
